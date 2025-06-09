@@ -1,0 +1,233 @@
+<?php
+
+/**
+ * @file
+ * Install, update and uninstall functions for Component Search module.
+ */
+
+use Drupal\Core\Database\Database;
+
+/**
+ * Implements hook_requirements().
+ */
+function component_search_requirements($phase) {
+  $requirements = [];
+
+  if ($phase === 'runtime') {
+    // Check if Component Field module is installed
+    if (!\Drupal::moduleHandler()->moduleExists('component_field')) {
+      $requirements['component_search_dependency'] = [
+        'title' => t('Component Search'),
+        'value' => t('Component Field module required'),
+        'severity' => REQUIREMENT_ERROR,
+        'description' => t('The Component Search module requires the Component Field module to be installed and enabled.'),
+      ];
+      return $requirements;
+    }
+
+    // Check component discovery
+    try {
+      $discovery = \Drupal::service('component_field.discovery');
+      $components = $discovery->discoverComponents();
+      $component_count = count($components);
+
+      $requirements['component_search_discovery'] = [
+        'title' => t('Component Search - Components'),
+        'value' => t('@count components available for search indexing', ['@count' => $component_count]),
+        'severity' => $component_count > 0 ? REQUIREMENT_OK : REQUIREMENT_WARNING,
+      ];
+
+      if ($component_count === 0) {
+        $requirements['component_search_discovery']['description'] = t(
+          'No components found for search indexing. Ensure your theme has components with proper configurations.'
+        );
+      }
+    } catch (\Exception $e) {
+      $requirements['component_search_discovery'] = [
+        'title' => t('Component Search - Components'),
+        'value' => t('Error discovering components'),
+        'severity' => REQUIREMENT_ERROR,
+        'description' => t('Error: @error', ['@error' => $e->getMessage()]),
+      ];
+    }
+
+    // Check search integration status
+    $config = \Drupal::config('component_search.settings');
+    $integrations = [];
+    
+    if ($config->get('enable_core_search')) {
+      $integrations[] = 'Drupal Core Search';
+    }
+    
+    if ($config->get('enable_search_api') && \Drupal::moduleHandler()->moduleExists('search_api')) {
+      $integrations[] = 'Search API';
+    }
+
+    $requirements['component_search_integration'] = [
+      'title' => t('Component Search - Integration'),
+      'value' => !empty($integrations) ? implode(', ', $integrations) : t('No search integration enabled'),
+      'severity' => !empty($integrations) ? REQUIREMENT_OK : REQUIREMENT_WARNING,
+    ];
+
+    if (empty($integrations)) {
+      $requirements['component_search_integration']['description'] = t(
+        'Enable search integration in the <a href="@url">Component Search configuration</a>.',
+        ['@url' => '/admin/config/search/component-search']
+      );
+    }
+
+    // Check for entities with component fields
+    try {
+      $helper = \Drupal::service('component_search.indexing_helper');
+      $stats = $helper->getGlobalComponentStats();
+      
+      $requirements['component_search_usage'] = [
+        'title' => t('Component Search - Usage'),
+        'value' => t('@entities entities with @components components', [
+          '@entities' => $stats['entities_with_components'],
+          '@components' => $stats['total_components'],
+        ]),
+        'severity' => $stats['entities_with_components'] > 0 ? REQUIREMENT_OK : REQUIREMENT_INFO,
+      ];
+
+      if ($stats['entities_with_components'] === 0) {
+        $requirements['component_search_usage']['description'] = t(
+          'No entities with component field content found. Create content with component fields to enable search functionality.'
+        );
+      }
+    } catch (\Exception $e) {
+      $requirements['component_search_usage'] = [
+        'title' => t('Component Search - Usage'),
+        'value' => t('Unable to determine usage'),
+        'severity' => REQUIREMENT_WARNING,
+        'description' => t('Error checking component field usage: @error', ['@error' => $e->getMessage()]),
+      ];
+    }
+  }
+
+  return $requirements;
+}
+
+/**
+ * Implements hook_install().
+ */
+function component_search_install() {
+  // Verify Component Field module is available
+  if (!\Drupal::moduleHandler()->moduleExists('component_field')) {
+    throw new \Exception('Component Field module must be installed before Component Search module.');
+  }
+
+  // Set up default configuration
+  $config = \Drupal::configFactory()->getEditable('component_search.settings');
+  $config->setData([
+    'enable_core_search' => TRUE,
+    'enable_search_api' => \Drupal::moduleHandler()->moduleExists('search_api'),
+    'enhance_search_terms' => TRUE,
+    'component_weights' => [],
+    'extraction_settings' => [
+      'extract_references' => TRUE,
+      'max_reference_depth' => 1,
+      'boost_titles' => 2.0,
+    ],
+    'performance_settings' => [
+      'cache_extractions' => TRUE,
+      'cache_max_age' => 86400, // 24 hours
+      'cache_size_limit' => 1048576, // 1MB
+      'batch_size' => 50,
+    ],
+  ]);
+  $config->save();
+
+  // Clear search indexes to trigger reindexing
+  component_search_clear_search_indexes();
+
+  // Initialize component weights based on discovered components
+  component_search_initialize_component_weights();
+
+  \Drupal::messenger()->addStatus(t('Component Search module installed successfully. Search indexes will be rebuilt to include component content.'));
+  
+  // Log installation
+  \Drupal::logger('component_search')->info('Component Search module installed and configured.');
+}
+
+/**
+ * Implements hook_uninstall().
+ */
+function component_search_uninstall() {
+  // Remove configuration
+  \Drupal::configFactory()->getEditable('component_search.settings')->delete();
+  
+  // Clear all caches
+  \Drupal::cache()->invalidateAll();
+  
+  // Clear search indexes
+  component_search_clear_search_indexes();
+  
+  \Drupal::messenger()->addStatus(t('Component Search module uninstalled. Search indexes cleared.'));
+  
+  // Log uninstallation
+  \Drupal::logger('component_search')->info('Component Search module uninstalled.');
+}
+
+/**
+ * Clear search indexes to trigger reindexing.
+ */
+function component_search_clear_search_indexes() {
+  try {
+    // Clear Drupal core search index
+    if (\Drupal::moduleHandler()->moduleExists('search')) {
+      \Drupal::service('search.index')->clear();
+    }
+
+    // Clear Search API indexes
+    if (\Drupal::moduleHandler()->moduleExists('search_api')) {
+      $index_storage = \Drupal::entityTypeManager()->getStorage('search_api_index');
+      $indexes = $index_storage->loadMultiple();
+      
+      foreach ($indexes as $index) {
+        if ($index->status()) {
+          $index->clear();
+        }
+      }
+    }
+  } catch (\Exception $e) {
+    \Drupal::logger('component_search')->error('Error clearing search indexes: @error', [
+      '@error' => $e->getMessage(),
+    ]);
+  }
+}
+
+/**
+ * Initialize component weights based on discovered components.
+ */
+function component_search_initialize_component_weights() {
+  try {
+    $discovery = \Drupal::service('component_field.discovery');
+    $components = $discovery->discoverComponents();
+    
+    $weights = [];
+    foreach ($components as $component_type => $component_info) {
+      // Set default weights based on component type patterns
+      $type_lower = strtolower($component_type);
+      
+      if (strpos($type_lower, 'hero') !== FALSE || strpos($type_lower, 'banner') !== FALSE) {
+        $weights[$component_type] = 2.5; // High importance
+      } elseif (strpos($type_lower, 'title') !== FALSE || strpos($type_lower, 'heading') !== FALSE) {
+        $weights[$component_type] = 2.0; // High importance
+      } elseif (strpos($type_lower, 'footer') !== FALSE || strpos($type_lower, 'sidebar') !== FALSE) {
+        $weights[$component_type] = 0.7; // Lower importance
+      } else {
+        $weights[$component_type] = 1.0; // Normal importance
+      }
+    }
+    
+    $config = \Drupal::configFactory()->getEditable('component_search.settings');
+    $config->set('component_weights', $weights);
+    $config->save();
+    
+  } catch (\Exception $e) {
+    \Drupal::logger('component_search')->warning('Error initializing component weights: @error', [
+      '@error' => $e->getMessage(),
+    ]);
+  }
+}

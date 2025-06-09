@@ -1,0 +1,186 @@
+<?php
+
+/**
+ * @file
+ * Component Search module integration with Drupal core search and Search API.
+ */
+
+use Drupal\Core\Entity\EntityInterface;
+use Drupal\Core\Form\FormStateInterface;
+use Drupal\search\SearchIndexInterface;
+
+/**
+ * Implements hook_help().
+ */
+function component_search_help($route_name, $route_match) {
+  switch ($route_name) {
+    case 'help.page.component_search':
+      return '<p>' . t('Provides search integration for Component Field module content, making component configurations searchable in both Drupal core search and Search API.') . '</p>';
+  }
+}
+
+/**
+ * Implements hook_entity_update().
+ */
+function component_search_entity_update(EntityInterface $entity) {
+  component_search_handle_entity_change($entity, 'update');
+}
+
+/**
+ * Implements hook_entity_insert().
+ */
+function component_search_entity_insert(EntityInterface $entity) {
+  component_search_handle_entity_change($entity, 'insert');
+}
+
+/**
+ * Implements hook_entity_delete().
+ */
+function component_search_entity_delete(EntityInterface $entity) {
+  component_search_handle_entity_change($entity, 'delete');
+}
+
+/**
+ * Handle entity changes for component field search integration.
+ */
+function component_search_handle_entity_change(EntityInterface $entity, string $operation) {
+  if (!component_search_entity_has_component_fields($entity)) {
+    return;
+  }
+
+  try {
+    $search_manager = \Drupal::service('component_search.search_manager');
+    $search_manager->handleEntityChange($entity, $operation);
+  } catch (\Exception $e) {
+    \Drupal::logger('component_search')->error('Error handling entity @op for search: @error', [
+      '@op' => $operation,
+      '@error' => $e->getMessage(),
+    ]);
+  }
+}
+
+/**
+ * Check if entity has component fields.
+ */
+function component_search_entity_has_component_fields(EntityInterface $entity): bool {
+  $field_definitions = $entity->getFieldDefinitions();
+  
+  foreach ($field_definitions as $field_definition) {
+    if ($field_definition->getType() === 'component_field') {
+      return true;
+    }
+  }
+  
+  return false;
+}
+
+/**
+ * Implements hook_search_preprocess().
+ */
+function component_search_search_preprocess($text, $langcode = NULL) {
+  // Preprocess component field content for core search
+  if (\Drupal::config('component_search.settings')->get('enable_core_search')) {
+    $content_extractor = \Drupal::service('component_search.content_extractor');
+    return $content_extractor->preprocessSearchText($text, $langcode);
+  }
+  
+  return $text;
+}
+
+/**
+ * Implements hook_node_update_index().
+ */
+function component_search_node_update_index(EntityInterface $node) {
+  if (!component_search_entity_has_component_fields($node)) {
+    return '';
+  }
+
+  $config = \Drupal::config('component_search.settings');
+  if (!$config->get('enable_core_search')) {
+    return '';
+  }
+
+  try {
+    $content_extractor = \Drupal::service('component_search.content_extractor');
+    return $content_extractor->extractSearchableContent($node);
+  } catch (\Exception $e) {
+    \Drupal::logger('component_search')->error('Error extracting searchable content for node @nid: @error', [
+      '@nid' => $node->id(),
+      '@error' => $e->getMessage(),
+    ]);
+    return '';
+  }
+}
+
+/**
+ * Implements hook_search_api_item_index_alter().
+ */
+function component_search_search_api_item_index_alter(array &$indexed_values, EntityInterface $entity) {
+  if (!\Drupal::moduleHandler()->moduleExists('search_api')) {
+    return;
+  }
+
+  if (!component_search_entity_has_component_fields($entity)) {
+    return;
+  }
+
+  $config = \Drupal::config('component_search.settings');
+  if (!$config->get('enable_search_api')) {
+    return;
+  }
+
+  try {
+    $content_extractor = \Drupal::service('component_search.content_extractor');
+    $extracted_data = $content_extractor->extractSearchApiContent($entity);
+    
+    // Merge extracted data into indexed values
+    foreach ($extracted_data as $field_name => $values) {
+      if (!isset($indexed_values[$field_name])) {
+        $indexed_values[$field_name] = [];
+      }
+      
+      if (is_array($values)) {
+        $indexed_values[$field_name] = array_merge($indexed_values[$field_name], $values);
+      } else {
+        $indexed_values[$field_name][] = $values;
+      }
+    }
+  } catch (\Exception $e) {
+    \Drupal::logger('component_search')->error('Error processing Search API indexing for entity @id: @error', [
+      '@id' => $entity->id(),
+      '@error' => $e->getMessage(),
+    ]);
+  }
+}
+
+/**
+ * Implements hook_form_FORM_ID_alter() for search_api_index_form.
+ */
+function component_search_form_search_api_index_form_alter(&$form, FormStateInterface $form_state, $form_id) {
+  if (!\Drupal::moduleHandler()->moduleExists('search_api')) {
+    return;
+  }
+
+  // Add component search configuration to Search API index forms
+  $form['component_search'] = [
+    '#type' => 'details',
+    '#title' => t('Component Search Settings'),
+    '#description' => t('Configure how component field content is indexed.'),
+    '#open' => FALSE,
+    '#weight' => 50,
+  ];
+
+  $form['component_search']['extract_component_content'] = [
+    '#type' => 'checkbox',
+    '#title' => t('Extract component content'),
+    '#description' => t('Extract searchable text from component configurations.'),
+    '#default_value' => TRUE,
+  ];
+
+  $form['component_search']['separate_component_types'] = [
+    '#type' => 'checkbox',
+    '#title' => t('Index component types separately'),
+    '#description' => t('Create separate search fields for different component types.'),
+    '#default_value' => FALSE,
+  ];
+}

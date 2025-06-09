@@ -1,0 +1,25 @@
+name: 'Component Search'
+type: module
+description: 'Provides comprehensive search integration for Component Field module with Drupal core search and Search API'
+package: 'Component Field'
+version: '1.0.0'
+core_version_requirement: ^10.4 || ^11
+
+dependencies:
+  - component_field:component_field
+  - drupal:search
+  - drupal:system
+  - drupal:field
+
+# Optional dependencies for enhanced functionality
+suggests:
+  - search_api:search_api
+
+configure: component_search.admin_form
+
+# Module lifecycle hooks
+lifecycle:
+  install:
+    - 'Clear search indexes and setup initial configuration'
+  uninstall:
+    - 'Remove all search data and clear indexes'

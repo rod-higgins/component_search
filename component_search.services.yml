@@ -1,0 +1,37 @@
+services:
+  component_search.content_extractor:
+    class: Drupal\component_search\Service\ComponentContentExtractor
+    arguments:
+      - '@component_field.discovery'
+      - '@entity_type.manager'
+      - '@config.factory'
+      - '@logger.factory'
+
+  component_search.search_manager:
+    class: Drupal\component_search\Service\ComponentSearchManager
+    arguments:
+      - '@component_search.content_extractor'
+      - '@search.index'
+      - '@config.factory'
+      - '@module_handler'
+
+  component_search.event_subscriber:
+    class: Drupal\component_search\EventSubscriber\ComponentSearchSubscriber
+    arguments:
+      - '@component_search.search_manager'
+    tags:
+      - { name: event_subscriber }
+
+  # Additional services for enhanced functionality
+  component_search.indexing_helper:
+    class: Drupal\component_search\Service\ComponentIndexingHelper
+    arguments:
+      - '@component_search.content_extractor'
+      - '@entity_type.manager'
+      - '@config.factory'
+
+  component_search.cache_manager:
+    class: Drupal\component_search\Service\ComponentSearchCacheManager
+    arguments:
+      - '@cache.default'
+      - '@config.factory'

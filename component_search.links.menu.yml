@@ -1,0 +1,6 @@
+component_search.admin:
+  title: 'Component Search'
+  route_name: component_search.admin_form
+  description: 'Configure Component Search integration with Drupal core search and Search API'
+  parent: system.admin_config_search
+  weight: 50

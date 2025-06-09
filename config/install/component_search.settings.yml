@@ -1,0 +1,46 @@
+# Default configuration for Component Search module
+enable_core_search: true
+enable_search_api: true
+enhance_search_terms: true
+
+# Component type weights for search relevance
+component_weights: {}
+
+# Content extraction settings
+extraction_settings:
+  extract_references: true
+  max_reference_depth: 1
+  boost_titles: 2.0
+  strip_html_tags: true
+  normalize_whitespace: true
+  include_metadata: false
+
+# Performance and caching settings
+performance_settings:
+  cache_extractions: true
+  cache_max_age: 86400  # 24 hours in seconds
+  cache_size_limit: 1048576  # 1MB in bytes
+  batch_size: 50
+  max_content_length: 50000
+  enable_background_indexing: false
+
+# Search integration options
+search_integration:
+  core_search:
+    enabled: true
+    include_in_node_index: true
+    boost_factor: 1.0
+  search_api:
+    enabled: true
+    auto_add_processors: true
+    default_processor_settings:
+      extract_references: true
+      separate_titles: true
+      include_config_data: false
+
+# Advanced options
+advanced_options:
+  debug_mode: false
+  log_extraction_errors: true
+  fallback_to_basic_extraction: true
+  validate_extracted_content: true

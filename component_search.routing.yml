@@ -1,0 +1,7 @@
+component_search.admin_form:
+  path: '/admin/config/search/component-search'
+  defaults:
+    _form: '\Drupal\component_search\Form\ComponentSearchConfigForm'
+    _title: 'Component Search Configuration'
+  requirements:
+    _permission: 'administer search'
