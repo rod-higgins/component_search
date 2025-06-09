@@ -6,6 +6,7 @@ use Drupal\Core\Config\ConfigFactoryInterface;
 use Drupal\Core\Entity\EntityInterface;
 use Drupal\Core\Entity\EntityTypeManagerInterface;
 use Drupal\Core\Logger\LoggerChannelFactoryInterface;
+use Drupal\Core\Cache\CacheBackendInterface;
 use Drupal\component_field\Service\ComponentDiscovery;
 
 /**
@@ -13,27 +14,60 @@ use Drupal\component_field\Service\ComponentDiscovery;
  */
 class ComponentContentExtractor {
 
+  /**
+   * Component discovery service.
+   */
   protected ComponentDiscovery $componentDiscovery;
+
+  /**
+   * Entity type manager.
+   */
   protected EntityTypeManagerInterface $entityTypeManager;
+
+  /**
+   * Config factory.
+   */
   protected ConfigFactoryInterface $configFactory;
+
+  /**
+   * Logger factory.
+   */
   protected LoggerChannelFactoryInterface $loggerFactory;
 
+  /**
+   * Cache backend.
+   */
+  protected CacheBackendInterface $cache;
+
+  /**
+   * Constructor.
+   */
   public function __construct(
     ComponentDiscovery $component_discovery,
     EntityTypeManagerInterface $entity_type_manager,
     ConfigFactoryInterface $config_factory,
-    LoggerChannelFactoryInterface $logger_factory
+    LoggerChannelFactoryInterface $logger_factory,
+    CacheBackendInterface $cache
   ) {
     $this->componentDiscovery = $component_discovery;
     $this->entityTypeManager = $entity_type_manager;
     $this->configFactory = $config_factory;
     $this->loggerFactory = $logger_factory;
+    $this->cache = $cache;
   }
 
   /**
    * Extract searchable content from entity for Drupal core search.
    */
   public function extractSearchableContent(EntityInterface $entity): string {
+    // Check cache first
+    $cache_key = $this->buildCacheKey($entity, 'core_search');
+    $cached = $this->cache->get($cache_key);
+    
+    if ($cached && $this->isCacheValid($cached, $entity)) {
+      return $cached->data;
+    }
+
     $content_parts = [];
     $config = $this->configFactory->get('component_search.settings');
     
@@ -57,18 +91,34 @@ class ComponentContentExtractor {
 
         $extracted = $this->extractComponentContent($component_type, $configuration, $config);
         if (!empty($extracted['content'])) {
-          $content_parts[] = $extracted['content'];
+          // Apply component weight
+          $weight = $config->get('component_weights.' . $component_type) ?? 1.0;
+          $weighted_content = str_repeat($extracted['content'] . ' ', max(1, (int)$weight));
+          $content_parts[] = $weighted_content;
         }
       }
     }
 
-    return implode(' ', $content_parts);
+    $result = implode(' ', $content_parts);
+    
+    // Cache the result
+    $this->setCachedContent($cache_key, $result, $entity);
+    
+    return $result;
   }
 
   /**
    * Extract content for Search API indexing.
    */
   public function extractSearchApiContent(EntityInterface $entity): array {
+    // Check cache first
+    $cache_key = $this->buildCacheKey($entity, 'search_api');
+    $cached = $this->cache->get($cache_key);
+    
+    if ($cached && $this->isCacheValid($cached, $entity)) {
+      return $cached->data;
+    }
+
     $extracted_data = [
       'component_content' => [],
       'component_titles' => [],
@@ -121,9 +171,14 @@ class ComponentContentExtractor {
       }
     }
 
-    return array_filter($extracted_data, function($value) {
+    $result = array_filter($extracted_data, function($value) {
       return !empty($value);
     });
+
+    // Cache the result
+    $this->setCachedContent($cache_key, $result, $entity);
+    
+    return $result;
   }
 
   /**
@@ -138,7 +193,7 @@ class ComponentContentExtractor {
 
     try {
       $component_info = $this->componentDiscovery->getComponent($component_type);
-      $weight_config = $config->get('component_weights.' . $component_type) ?? [];
+      $extraction_settings = $config->get('extraction_settings') ?? [];
 
       foreach ($configuration as $prop_name => $prop_value) {
         if (empty($prop_value)) {
@@ -146,23 +201,25 @@ class ComponentContentExtractor {
         }
 
         $content_type = $this->determineContentType($prop_name, $prop_value, $component_info);
-        $weight = $weight_config[$prop_name] ?? 1.0;
         
-        $text_content = $this->extractTextFromValue($prop_value);
+        $text_content = $this->extractTextFromValue($prop_value, $extraction_settings);
         
         if (!empty($text_content)) {
-          // Apply weight by repeating content
-          $weighted_content = str_repeat($text_content . ' ', max(1, (int)$weight));
-          
           switch ($content_type) {
             case 'title':
-              $extracted['titles'][] = $weighted_content;
+              $boost = $extraction_settings['boost_titles'] ?? 2.0;
+              $boosted_content = str_repeat($text_content . ' ', max(1, (int)$boost));
+              $extracted['titles'][] = $boosted_content;
               break;
+              
             case 'reference':
-              $extracted['references'][] = $text_content;
+              if ($extraction_settings['extract_references'] ?? TRUE) {
+                $extracted['references'][] = $text_content;
+              }
               break;
+              
             default:
-              $extracted['content'][] = $weighted_content;
+              $extracted['content'][] = $text_content;
           }
         }
       }
@@ -201,38 +258,45 @@ class ComponentContentExtractor {
       return 'reference';
     }
 
+    // Check component metadata for hints
+    if (!empty($component_info['properties'][$prop_name]['content_type'])) {
+      return $component_info['properties'][$prop_name]['content_type'];
+    }
+
     return 'content';
   }
 
   /**
    * Extract text content from various value types.
    */
-  protected function extractTextFromValue($value): string {
+  protected function extractTextFromValue($value, array $settings = []): string {
+    $max_length = $settings['max_content_length'] ?? 50000;
+    
     // Handle text_format fields (rich text)
     if (is_array($value) && isset($value['value'], $value['format'])) {
-      $text = strip_tags($value['value']);
-      return $this->cleanText($text);
+      $text = $this->processRichText($value['value'], $settings);
+      return $this->cleanText($text, $max_length);
     }
 
     // Handle processed text
     if (is_array($value) && isset($value['processed'])) {
-      $text = strip_tags($value['processed']);
-      return $this->cleanText($text);
+      $text = $this->processRichText($value['processed'], $settings);
+      return $this->cleanText($text, $max_length);
     }
 
     // Handle entity references
     if (is_array($value) && isset($value['target_id'])) {
-      return $this->extractEntityReferenceText($value);
+      return $this->extractEntityReferenceText($value, $settings);
     }
 
     // Handle media library selections
     if (is_array($value) && isset($value['selection'])) {
-      return $this->extractMediaSelectionText($value['selection']);
+      return $this->extractMediaSelectionText($value['selection'], $settings);
     }
 
     // Handle simple strings
     if (is_string($value)) {
-      return $this->cleanText(strip_tags($value));
+      return $this->cleanText(strip_tags($value), $max_length);
     }
 
     // Handle arrays of values
@@ -245,17 +309,36 @@ class ComponentContentExtractor {
           $text_parts[] = $this->cleanText(strip_tags($item['value']));
         }
       }
-      return implode(' ', array_filter($text_parts));
+      $combined = implode(' ', array_filter($text_parts));
+      return $this->cleanText($combined, $max_length);
     }
 
     return '';
   }
 
   /**
+   * Process rich text content.
+   */
+  protected function processRichText(string $text, array $settings): string {
+    if ($settings['strip_html_tags'] ?? TRUE) {
+      // Strip HTML but preserve some formatting
+      $text = preg_replace('/<\/(p|div|h[1-6]|li)>/i', "\n", $text);
+      $text = strip_tags($text);
+    }
+    
+    return $text;
+  }
+
+  /**
    * Extract text from entity reference.
    */
-  protected function extractEntityReferenceText(array $reference): string {
+  protected function extractEntityReferenceText(array $reference, array $settings): string {
     $entity_type = $reference['entity_type'] ?? 'node';
+    $max_depth = $settings['max_reference_depth'] ?? 1;
+    
+    if ($max_depth <= 0) {
+      return '';
+    }
     
     try {
       $entity = $this->entityTypeManager->getStorage($entity_type)->load($reference['target_id']);
@@ -272,7 +355,7 @@ class ComponentContentExtractor {
       }
 
       // Extract additional content based on entity type
-      $additional_content = $this->extractAdditionalEntityContent($entity);
+      $additional_content = $this->extractAdditionalEntityContent($entity, $settings, $max_depth - 1);
       if (!empty($additional_content)) {
         $text_parts[] = $additional_content;
       }
@@ -292,7 +375,11 @@ class ComponentContentExtractor {
   /**
    * Extract additional content from referenced entities.
    */
-  protected function extractAdditionalEntityContent(EntityInterface $entity): string {
+  protected function extractAdditionalEntityContent(EntityInterface $entity, array $settings, int $remaining_depth): string {
+    if ($remaining_depth <= 0) {
+      return '';
+    }
+    
     $text_parts = [];
     
     try {
@@ -305,7 +392,7 @@ class ComponentContentExtractor {
             $field_values = $entity->get($field_name)->getValue();
             foreach ($field_values as $field_value) {
               if (!empty($field_value['value'])) {
-                $text_parts[] = strip_tags($field_value['value']);
+                $text_parts[] = $this->processRichText($field_value['value'], $settings);
               }
             }
           }
@@ -316,7 +403,7 @@ class ComponentContentExtractor {
       if ($entity->getEntityTypeId() === 'taxonomy_term' && $entity->hasField('description')) {
         $description = $entity->get('description')->getValue();
         if (!empty($description[0]['value'])) {
-          $text_parts[] = strip_tags($description[0]['value']);
+          $text_parts[] = $this->processRichText($description[0]['value'], $settings);
         }
       }
       
@@ -344,14 +431,14 @@ class ComponentContentExtractor {
   /**
    * Extract text from media library selection.
    */
-  protected function extractMediaSelectionText(array $selection): string {
+  protected function extractMediaSelectionText(array $selection, array $settings): string {
     $text_parts = [];
     
     try {
       foreach ($selection as $media_id) {
         $media = $this->entityTypeManager->getStorage('media')->load($media_id);
         if ($media) {
-          $text_parts[] = $this->extractAdditionalEntityContent($media);
+          $text_parts[] = $this->extractAdditionalEntityContent($media, $settings, 1);
         }
       }
     } catch (\Exception $e) {
@@ -368,25 +455,37 @@ class ComponentContentExtractor {
   /**
    * Clean and normalize text content.
    */
-  protected function cleanText(string $text): string {
-    // Remove extra whitespace
-    $text = preg_replace('/\s+/', ' ', $text);
+  protected function cleanText(string $text, int $max_length = 0): string {
+    // Normalize whitespace
+    if ($this->configFactory->get('component_search.settings')->get('extraction_settings.normalize_whitespace') ?? TRUE) {
+      $text = preg_replace('/\s+/', ' ', $text);
+    }
     
     // Remove special characters that might interfere with search
     $text = preg_replace('/[^\p{L}\p{N}\p{P}\p{S}\s]/u', '', $text);
     
-    return trim($text);
+    $text = trim($text);
+    
+    // Truncate if necessary
+    if ($max_length > 0 && strlen($text) > $max_length) {
+      $text = substr($text, 0, $max_length);
+      // Try to break at word boundary
+      $last_space = strrpos($text, ' ');
+      if ($last_space !== FALSE && $last_space > $max_length * 0.8) {
+        $text = substr($text, 0, $last_space);
+      }
+    }
+    
+    return $text;
   }
 
   /**
    * Preprocess search text for core search integration.
    */
   public function preprocessSearchText(string $text, ?string $langcode = NULL): string {
-    // Apply any component-specific text preprocessing
     $config = $this->configFactory->get('component_search.settings');
     
     if ($config->get('enhance_search_terms')) {
-      // Add component-related search term expansions
       $text = $this->expandSearchTerms($text);
     }
     
@@ -398,10 +497,14 @@ class ComponentContentExtractor {
    */
   protected function expandSearchTerms(string $text): string {
     $expansions = [
-      'button' => 'button click action cta call-to-action',
-      'card' => 'card panel widget block section',
-      'hero' => 'hero banner header featured highlight',
-      'text' => 'text content copy paragraph description',
+      'button' => 'button click action cta call-to-action link',
+      'card' => 'card panel widget block section tile',
+      'hero' => 'hero banner header featured highlight jumbotron',
+      'text' => 'text content copy paragraph description body',
+      'image' => 'image picture photo media visual graphic',
+      'video' => 'video media player multimedia clip',
+      'form' => 'form contact input field submit',
+      'navigation' => 'navigation menu nav links sitemap',
     ];
 
     foreach ($expansions as $term => $expansion) {
@@ -411,5 +514,63 @@ class ComponentContentExtractor {
     }
 
     return $text;
+  }
+
+  /**
+   * Build cache key for entity and extraction type.
+   */
+  protected function buildCacheKey(EntityInterface $entity, string $type): string {
+    return sprintf(
+      'component_search:%s:%s:%s:%s',
+      $type,
+      $entity->getEntityTypeId(),
+      $entity->id(),
+      $entity->getChangedTime()
+    );
+  }
+
+  /**
+   * Check if cached data is still valid.
+   */
+  protected function isCacheValid($cached_data, EntityInterface $entity): bool {
+    if (!isset($cached_data->data)) {
+      return FALSE;
+    }
+
+    $config = $this->configFactory->get('component_search.settings');
+    
+    // Check if caching is enabled
+    if (!$config->get('performance_settings.cache_extractions')) {
+      return FALSE;
+    }
+
+    // Check cache age
+    $max_age = $config->get('performance_settings.cache_max_age') ?? 86400;
+    if ($max_age > 0 && (REQUEST_TIME - $cached_data->created) > $max_age) {
+      return FALSE;
+    }
+
+    return TRUE;
+  }
+
+  /**
+   * Cache extracted content.
+   */
+  protected function setCachedContent(string $cache_key, $content, EntityInterface $entity): void {
+    $config = $this->configFactory->get('component_search.settings');
+    
+    if (!$config->get('performance_settings.cache_extractions')) {
+      return;
+    }
+
+    $max_age = $config->get('performance_settings.cache_max_age') ?? 86400;
+    $expire = $max_age > 0 ? REQUEST_TIME + $max_age : CacheBackendInterface::CACHE_PERMANENT;
+    
+    $tags = [
+      'component_search',
+      'component_search:entity:' . $entity->getEntityTypeId() . ':' . $entity->id(),
+    ];
+    
+    $this->cache->set($cache_key, $content, $expire, $tags);
   }
 }

@@ -67,11 +67,16 @@ function component_search_entity_has_component_fields(EntityInterface $entity): 
   
   foreach ($field_definitions as $field_definition) {
     if ($field_definition->getType() === 'component_field') {
-      return true;
+      // Check if the field actually has values
+      $field_name = $field_definition->getName();
+      $field_values = $entity->get($field_name);
+      if (!$field_values->isEmpty()) {
+        return TRUE;
+      }
     }
   }
   
-  return false;
+  return FALSE;
 }
 
 /**
@@ -183,4 +188,39 @@ function component_search_form_search_api_index_form_alter(&$form, FormStateInte
     '#description' => t('Create separate search fields for different component types.'),
     '#default_value' => FALSE,
   ];
+}
+
+/**
+ * Implements hook_entity_bundle_field_info().
+ */
+function component_search_entity_bundle_field_info(\Drupal\Core\Entity\EntityTypeInterface $entity_type, $bundle, array $base_field_definitions) {
+  $fields = [];
+
+  // Add computed field for aggregated component search content
+  if ($entity_type->id() === 'node') {
+    $fields['component_searchable_content'] = \Drupal\Core\Field\BaseFieldDefinition::create('component_searchable_content')
+      ->setLabel(t('Component Searchable Content'))
+      ->setDescription(t('Aggregated searchable content from all component fields'))
+      ->setComputed(TRUE)
+      ->setTranslatable(FALSE)
+      ->setDisplayConfigurable('view', FALSE)
+      ->setDisplayConfigurable('form', FALSE);
+  }
+
+  return $fields;
+}
+
+/**
+ * Implements hook_cache_flush().
+ */
+function component_search_cache_flush() {
+  // Clear component search cache when general cache is flushed
+  try {
+    $cache_manager = \Drupal::service('component_search.cache_manager');
+    $cache_manager->invalidateAllCache();
+  } catch (\Exception $e) {
+    \Drupal::logger('component_search')->warning('Error clearing component search cache: @error', [
+      '@error' => $e->getMessage(),
+    ]);
+  }
 }

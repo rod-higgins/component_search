@@ -4,7 +4,6 @@ description: 'Provides comprehensive search integration for Component Field modu
 package: 'Component Field'
 version: '1.0.0'
 core_version_requirement: ^10.4 || ^11
-
 dependencies:
   - drupal:component_field
   - drupal:search

@@ -35,8 +35,10 @@ class ComponentSearchManager {
   public function handleEntityChange(EntityInterface $entity, string $operation): void {
     $config = $this->configFactory->get('component_search.settings');
 
-    // Handle Drupal core search
-    if ($config->get('enable_core_search') && $this->searchIndex) {
+    // Handle Drupal core search - only if search module is enabled and service available
+    if ($config->get('enable_core_search') && 
+        $this->searchIndex && 
+        $this->moduleHandler->moduleExists('search')) {
       $this->updateCoreSearchIndex($entity, $operation);
     }
 
@@ -50,6 +52,11 @@ class ComponentSearchManager {
    * Update Drupal core search index.
    */
   protected function updateCoreSearchIndex(EntityInterface $entity, string $operation): void {
+    // Additional null check for safety
+    if (!$this->searchIndex) {
+      return;
+    }
+
     try {
       switch ($operation) {
         case 'insert':
@@ -161,7 +168,10 @@ class ComponentSearchManager {
   protected function hasComponentFields(EntityInterface $entity): bool {
     foreach ($entity->getFieldDefinitions() as $field_definition) {
       if ($field_definition->getType() === 'component_field') {
-        return TRUE;
+        $field_values = $entity->get($field_definition->getName());
+        if (!$field_values->isEmpty()) {
+          return TRUE;
+        }
       }
     }
     return FALSE;
@@ -191,14 +201,16 @@ class ComponentSearchManager {
       }
 
       // Get component type usage statistics
-      $discovery = \Drupal::service('component_field.discovery');
-      $components = $discovery->discoverComponents();
-      
-      foreach ($components as $component_type => $component_info) {
-        $stats['component_types'][$component_type] = [
-          'label' => $component_info['label'] ?? $component_type,
-          'usage_count' => 0, // Would need to be calculated from actual data
-        ];
+      if (\Drupal::hasService('component_field.discovery')) {
+        $discovery = \Drupal::service('component_field.discovery');
+        $components = $discovery->discoverComponents();
+        
+        foreach ($components as $component_type => $component_info) {
+          $stats['component_types'][$component_type] = [
+            'label' => $component_info['label'] ?? $component_type,
+            'usage_count' => 0, // Would need to be calculated from actual data
+          ];
+        }
       }
 
     } catch (\Exception $e) {

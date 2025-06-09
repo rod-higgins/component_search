@@ -1,0 +1,192 @@
+component_search.settings:
+  type: config_object
+  label: 'Component Search settings'
+  mapping:
+    enable_core_search:
+      type: boolean
+      label: 'Enable Drupal core search integration'
+    enable_search_api:
+      type: boolean
+      label: 'Enable Search API integration'
+    enhance_search_terms:
+      type: boolean
+      label: 'Enhance search terms with component-related synonyms'
+    component_weights:
+      type: mapping
+      label: 'Component type weights'
+      mapping:
+        '[component_type]':
+          type: float
+          label: 'Weight for component type'
+    extraction_settings:
+      type: mapping
+      label: 'Content extraction settings'
+      mapping:
+        extract_references:
+          type: boolean
+          label: 'Extract referenced entity content'
+        max_reference_depth:
+          type: integer
+          label: 'Maximum reference depth'
+        boost_titles:
+          type: float
+          label: 'Title content boost multiplier'
+        strip_html_tags:
+          type: boolean
+          label: 'Strip HTML tags from content'
+        normalize_whitespace:
+          type: boolean
+          label: 'Normalize whitespace in content'
+        max_content_length:
+          type: integer
+          label: 'Maximum content length in characters'
+        include_metadata:
+          type: boolean
+          label: 'Include component metadata in extraction'
+    performance_settings:
+      type: mapping
+      label: 'Performance settings'
+      mapping:
+        cache_extractions:
+          type: boolean
+          label: 'Cache content extractions'
+        cache_max_age:
+          type: integer
+          label: 'Cache maximum age in seconds'
+        cache_size_limit:
+          type: integer
+          label: 'Cache size limit in bytes'
+        batch_size:
+          type: integer
+          label: 'Batch processing size'
+        max_content_length:
+          type: integer
+          label: 'Maximum content length'
+        enable_background_indexing:
+          type: boolean
+          label: 'Enable background indexing'
+    search_integration:
+      type: mapping
+      label: 'Search integration options'
+      mapping:
+        core_search:
+          type: mapping
+          label: 'Core search settings'
+          mapping:
+            enabled:
+              type: boolean
+              label: 'Core search enabled'
+            include_in_node_index:
+              type: boolean
+              label: 'Include in node index'
+            boost_factor:
+              type: float
+              label: 'Content boost factor'
+        search_api:
+          type: mapping
+          label: 'Search API settings'
+          mapping:
+            enabled:
+              type: boolean
+              label: 'Search API enabled'
+            auto_add_processors:
+              type: boolean
+              label: 'Automatically add processors'
+            default_processor_settings:
+              type: mapping
+              label: 'Default processor settings'
+              mapping:
+                extract_references:
+                  type: boolean
+                  label: 'Extract references'
+                separate_titles:
+                  type: boolean
+                  label: 'Separate titles'
+                include_config_data:
+                  type: boolean
+                  label: 'Include config data'
+    advanced_options:
+      type: mapping
+      label: 'Advanced options'
+      mapping:
+        debug_mode:
+          type: boolean
+          label: 'Debug mode'
+        log_extraction_errors:
+          type: boolean
+          label: 'Log extraction errors'
+        fallback_to_basic_extraction:
+          type: boolean
+          label: 'Fallback to basic extraction'
+        validate_extracted_content:
+          type: boolean
+          label: 'Validate extracted content'
+
+# Search API processor schemas
+search_api.processor.component_content:
+  type: mapping
+  label: 'Component Content Processor configuration'
+  mapping:
+    extract_references:
+      type: boolean
+      label: 'Extract referenced entity content'
+    boost_titles:
+      type: float
+      label: 'Title content boost multiplier'
+    max_reference_depth:
+      type: integer
+      label: 'Maximum reference depth'
+    component_weights:
+      type: mapping
+      label: 'Component type weights'
+      mapping:
+        '[component_type]':
+          type: float
+          label: 'Weight for component type'
+
+search_api.processor.component_type:
+  type: mapping
+  label: 'Component Type Processor configuration'
+  mapping:
+    add_boolean_fields:
+      type: boolean
+      label: 'Add boolean fields for each component type'
+    enable_categories:
+      type: boolean
+      label: 'Enable component categories'
+    category_mapping:
+      type: string
+      label: 'Custom category mapping'
+    category_mapping_processed:
+      type: mapping
+      label: 'Processed category mapping'
+      mapping:
+        '[component_type]':
+          type: string
+          label: 'Category for component type'
+
+# Field type schema
+field.field_type.component_searchable_content:
+  type: mapping
+  label: 'Component Searchable Content field'
+  mapping:
+    settings:
+      type: mapping
+      label: 'Settings'
+
+# Cache context schema
+cache.context.component_search:
+  type: mapping
+  label: 'Component Search cache context'
+
+# Queue worker schema
+queue_worker.component_search_index:
+  type: mapping
+  label: 'Component Search index queue worker'
+  mapping:
+    batch_size:
+      type: integer
+      label: 'Batch size for processing'
+    timeout:
+      type: integer
+      label: 'Processing timeout in seconds'
