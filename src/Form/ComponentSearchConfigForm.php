@@ -6,6 +6,7 @@ use Drupal\Core\Form\ConfigFormBase;
 use Drupal\Core\Form\FormStateInterface;
 use Drupal\Core\Config\ConfigFactoryInterface;
 use Drupal\Core\Extension\ModuleHandlerInterface;
+use Drupal\Core\Extension\ModuleExtensionList;
 use Drupal\component_field\Service\ComponentDiscovery;
 use Drupal\component_search\Service\ComponentIndexingHelper;
 use Symfony\Component\DependencyInjection\ContainerInterface;
@@ -31,18 +32,25 @@ class ComponentSearchConfigForm extends ConfigFormBase {
   protected ComponentIndexingHelper $indexingHelper;
 
   /**
+   * Module extension list service.
+   */
+  protected ModuleExtensionList $moduleExtensionList;
+
+  /**
    * Constructor.
    */
   public function __construct(
     ConfigFactoryInterface $config_factory,
     ComponentDiscovery $component_discovery,
     ModuleHandlerInterface $module_handler,
-    ComponentIndexingHelper $indexing_helper
+    ComponentIndexingHelper $indexing_helper,
+    ModuleExtensionList $module_extension_list
   ) {
     parent::__construct($config_factory);
     $this->componentDiscovery = $component_discovery;
     $this->moduleHandler = $module_handler;
     $this->indexingHelper = $indexing_helper;
+    $this->moduleExtensionList = $module_extension_list;
   }
 
   /**
@@ -53,7 +61,8 @@ class ComponentSearchConfigForm extends ConfigFormBase {
       $container->get('config.factory'),
       $container->get('component_field.discovery'),
       $container->get('module_handler'),
-      $container->get('component_search.indexing_helper')
+      $container->get('component_search.indexing_helper'),
+      $container->get('extension.list.module')
     );
   }
 
@@ -84,16 +93,24 @@ class ComponentSearchConfigForm extends ConfigFormBase {
       '#open' => TRUE,
     ];
 
-    $stats = $this->indexingHelper->getGlobalComponentStats();
-    $form['status']['statistics'] = [
-      '#type' => 'item',
-      '#title' => $this->t('Statistics'),
-      '#markup' => $this->t('Entities with components: @entities<br>Total components: @components<br>Component types: @types', [
-        '@entities' => $stats['entities_with_components'],
-        '@components' => $stats['total_components'],
-        '@types' => count($stats['component_types']),
-      ]),
-    ];
+    try {
+      $stats = $this->indexingHelper->getGlobalComponentStats();
+      $form['status']['statistics'] = [
+        '#type' => 'item',
+        '#title' => $this->t('Statistics'),
+        '#markup' => $this->t('Entities with components: @entities<br>Total components: @components<br>Component types: @types', [
+          '@entities' => $stats['entities_with_components'],
+          '@components' => $stats['total_components'],
+          '@types' => count($stats['component_types']),
+        ]),
+      ];
+    } catch (\Exception $e) {
+      $form['status']['statistics'] = [
+        '#type' => 'item',
+        '#title' => $this->t('Statistics'),
+        '#markup' => $this->t('Error loading statistics: @error', ['@error' => $e->getMessage()]),
+      ];
+    }
 
     $form['search_integration'] = [
       '#type' => 'details',
@@ -219,6 +236,8 @@ class ComponentSearchConfigForm extends ConfigFormBase {
             $this->t('Description'),
           ],
           '#empty' => $this->t('No components found.'),
+          '#prefix' => '<div id="weights-table-wrapper">',
+          '#suffix' => '</div>',
         ];
 
         foreach ($components as $component_type => $component_info) {
@@ -303,22 +322,26 @@ class ComponentSearchConfigForm extends ConfigFormBase {
     ];
 
     // Show recommended settings
-    $recommendations = $this->indexingHelper->getRecommendedSettings();
-    if (!empty($recommendations)) {
-      $form['performance']['recommendations'] = [
-        '#type' => 'details',
-        '#title' => $this->t('Recommendations'),
-        '#open' => FALSE,
-      ];
+    try {
+      $recommendations = $this->indexingHelper->getRecommendedSettings();
+      if (!empty($recommendations)) {
+        $form['performance']['recommendations'] = [
+          '#type' => 'details',
+          '#title' => $this->t('Recommendations'),
+          '#open' => FALSE,
+        ];
 
-      $rec_text = [];
-      foreach ($recommendations as $key => $value) {
-        $rec_text[] = $this->t('@key: @value', ['@key' => $key, '@value' => $value]);
+        $rec_text = [];
+        foreach ($recommendations as $key => $value) {
+          $rec_text[] = $this->t('@key: @value', ['@key' => $key, '@value' => $value]);
+        }
+
+        $form['performance']['recommendations']['list'] = [
+          '#markup' => '<ul><li>' . implode('</li><li>', $rec_text) . '</li></ul>',
+        ];
       }
-
-      $form['performance']['recommendations']['list'] = [
-        '#markup' => '<ul><li>' . implode('</li><li>', $rec_text) . '</li></ul>',
-      ];
+    } catch (\Exception $e) {
+      // Silently ignore recommendation errors
     }
 
     $form['actions']['save'] = [
@@ -420,7 +443,11 @@ class ComponentSearchConfigForm extends ConfigFormBase {
 
     // Clear component search cache
     if (\Drupal::hasService('component_search.cache_manager')) {
-      \Drupal::service('component_search.cache_manager')->invalidateAllCache();
+      try {
+        \Drupal::service('component_search.cache_manager')->invalidateAllCache();
+      } catch (\Exception $e) {
+        $this->messenger()->addWarning($this->t('Error clearing cache: @error', ['@error' => $e->getMessage()]));
+      }
     }
 
     parent::submitForm($form, $form_state);
@@ -515,7 +542,6 @@ class ComponentSearchConfigForm extends ConfigFormBase {
           'title' => $this->t('Rebuilding search indexes'),
           'operations' => $operations,
           'finished' => '\Drupal\component_search\Batch\RebuildSearchIndexBatch::finished',
-          'file' => drupal_get_path('module', 'component_search') . '/src/Batch/RebuildSearchIndexBatch.php',
         ];
         
         batch_set($batch);

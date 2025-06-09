@@ -7,14 +7,16 @@ services:
       - '@config.factory'
       - '@logger.factory'
       - '@cache.default'
+      - '@datetime.time'
 
   component_search.search_manager:
     class: Drupal\component_search\Service\ComponentSearchManager
     arguments:
       - '@component_search.content_extractor'
-      - '@?search.index'
       - '@config.factory'
       - '@module_handler'
+      - '@logger.factory'
+      - '@?search.index'
 
   component_search.event_subscriber:
     class: Drupal\component_search\EventSubscriber\ComponentSearchSubscriber
@@ -39,6 +41,8 @@ services:
   # Parameter converter for entity routes
   component_search.entity_converter:
     class: Drupal\component_search\ParamConverter\ComponentSearchEntityConverter
+    arguments:
+      - '@entity_type.manager'
     tags:
       - { name: paramconverter }
 
@@ -49,8 +53,3 @@ services:
       - '@request_stack'
     tags:
       - { name: cache.context }
-
-  # Queue worker for background indexing
-  plugin.manager.component_search_queue_worker:
-    class: Drupal\component_search\Plugin\QueueWorker\ComponentSearchIndexWorker
-    parent: default_plugin_manager

@@ -7,6 +7,7 @@ use Drupal\Core\Entity\EntityInterface;
 use Drupal\Core\Entity\EntityTypeManagerInterface;
 use Drupal\Core\Logger\LoggerChannelFactoryInterface;
 use Drupal\Core\Cache\CacheBackendInterface;
+use Drupal\Core\Datetime\TimeInterface;
 use Drupal\component_field\Service\ComponentDiscovery;
 
 /**
@@ -40,6 +41,11 @@ class ComponentContentExtractor {
   protected CacheBackendInterface $cache;
 
   /**
+   * Time service.
+   */
+  protected TimeInterface $time;
+
+  /**
    * Constructor.
    */
   public function __construct(
@@ -47,13 +53,15 @@ class ComponentContentExtractor {
     EntityTypeManagerInterface $entity_type_manager,
     ConfigFactoryInterface $config_factory,
     LoggerChannelFactoryInterface $logger_factory,
-    CacheBackendInterface $cache
+    CacheBackendInterface $cache,
+    TimeInterface $time
   ) {
     $this->componentDiscovery = $component_discovery;
     $this->entityTypeManager = $entity_type_manager;
     $this->configFactory = $config_factory;
     $this->loggerFactory = $logger_factory;
     $this->cache = $cache;
+    $this->time = $time;
   }
 
   /**
@@ -71,32 +79,40 @@ class ComponentContentExtractor {
     $content_parts = [];
     $config = $this->configFactory->get('component_search.settings');
     
-    foreach ($entity->getFieldDefinitions() as $field_name => $field_definition) {
-      if ($field_definition->getType() !== 'component_field') {
-        continue;
-      }
-
-      $field_values = $entity->get($field_name);
-      if ($field_values->isEmpty()) {
-        continue;
-      }
-
-      foreach ($field_values as $field_item) {
-        $component_type = $field_item->get('component_type')->getValue();
-        $configuration = $field_item->getConfiguration();
-
-        if (empty($component_type) || empty($configuration)) {
+    try {
+      foreach ($entity->getFieldDefinitions() as $field_name => $field_definition) {
+        if ($field_definition->getType() !== 'component_field') {
           continue;
         }
 
-        $extracted = $this->extractComponentContent($component_type, $configuration, $config);
-        if (!empty($extracted['content'])) {
-          // Apply component weight
-          $weight = $config->get('component_weights.' . $component_type) ?? 1.0;
-          $weighted_content = str_repeat($extracted['content'] . ' ', max(1, (int)$weight));
-          $content_parts[] = $weighted_content;
+        $field_values = $entity->get($field_name);
+        if ($field_values->isEmpty()) {
+          continue;
+        }
+
+        foreach ($field_values as $field_item) {
+          $component_type = $field_item->get('component_type')->getValue();
+          $configuration = $field_item->getConfiguration();
+
+          if (empty($component_type) || empty($configuration)) {
+            continue;
+          }
+
+          $extracted = $this->extractComponentContent($component_type, $configuration, $config);
+          if (!empty($extracted['content'])) {
+            // Apply component weight
+            $weight = $config->get('component_weights.' . $component_type) ?? 1.0;
+            $weighted_content = str_repeat($extracted['content'] . ' ', max(1, (int)$weight));
+            $content_parts[] = $weighted_content;
+          }
         }
       }
+    } catch (\Exception $e) {
+      $this->loggerFactory->get('component_search')->error('Error extracting searchable content for entity @id: @error', [
+        '@id' => $entity->id(),
+        '@error' => $e->getMessage(),
+      ]);
+      return '';
     }
 
     $result = implode(' ', $content_parts);
@@ -128,47 +144,55 @@ class ComponentContentExtractor {
 
     $config = $this->configFactory->get('component_search.settings');
     
-    foreach ($entity->getFieldDefinitions() as $field_name => $field_definition) {
-      if ($field_definition->getType() !== 'component_field') {
-        continue;
-      }
-
-      $field_values = $entity->get($field_name);
-      if ($field_values->isEmpty()) {
-        continue;
-      }
-
-      foreach ($field_values as $field_item) {
-        $component_type = $field_item->get('component_type')->getValue();
-        $configuration = $field_item->getConfiguration();
-
-        if (empty($component_type) || empty($configuration)) {
+    try {
+      foreach ($entity->getFieldDefinitions() as $field_name => $field_definition) {
+        if ($field_definition->getType() !== 'component_field') {
           continue;
         }
 
-        $extracted = $this->extractComponentContent($component_type, $configuration, $config);
-        
-        // Distribute content to appropriate search fields
-        if (!empty($extracted['content'])) {
-          $extracted_data['component_content'][] = $extracted['content'];
+        $field_values = $entity->get($field_name);
+        if ($field_values->isEmpty()) {
+          continue;
         }
-        
-        if (!empty($extracted['titles'])) {
-          $extracted_data['component_titles'] = array_merge(
-            $extracted_data['component_titles'], 
-            $extracted['titles']
-          );
-        }
-        
-        $extracted_data['component_types'][] = $component_type;
-        
-        if (!empty($extracted['references'])) {
-          $extracted_data['component_references'] = array_merge(
-            $extracted_data['component_references'], 
-            $extracted['references']
-          );
+
+        foreach ($field_values as $field_item) {
+          $component_type = $field_item->get('component_type')->getValue();
+          $configuration = $field_item->getConfiguration();
+
+          if (empty($component_type) || empty($configuration)) {
+            continue;
+          }
+
+          $extracted = $this->extractComponentContent($component_type, $configuration, $config);
+          
+          // Distribute content to appropriate search fields
+          if (!empty($extracted['content'])) {
+            $extracted_data['component_content'][] = $extracted['content'];
+          }
+          
+          if (!empty($extracted['titles'])) {
+            $extracted_data['component_titles'] = array_merge(
+              $extracted_data['component_titles'], 
+              $extracted['titles']
+            );
+          }
+          
+          $extracted_data['component_types'][] = $component_type;
+          
+          if (!empty($extracted['references'])) {
+            $extracted_data['component_references'] = array_merge(
+              $extracted_data['component_references'], 
+              $extracted['references']
+            );
+          }
         }
       }
+    } catch (\Exception $e) {
+      $this->loggerFactory->get('component_search')->error('Error extracting Search API content for entity @id: @error', [
+        '@id' => $entity->id(),
+        '@error' => $e->getMessage(),
+      ]);
+      return [];
     }
 
     $result = array_filter($extracted_data, function($value) {
@@ -192,7 +216,11 @@ class ComponentContentExtractor {
     ];
 
     try {
-      $component_info = $this->componentDiscovery->getComponent($component_type);
+      $component_info = NULL;
+      if (\Drupal::hasService('component_field.discovery')) {
+        $component_info = $this->componentDiscovery->getComponent($component_type);
+      }
+      
       $extraction_settings = $config->get('extraction_settings') ?? [];
 
       foreach ($configuration as $prop_name => $prop_value) {
@@ -341,6 +369,10 @@ class ComponentContentExtractor {
     }
     
     try {
+      if (!$this->entityTypeManager->hasDefinition($entity_type)) {
+        return '';
+      }
+
       $entity = $this->entityTypeManager->getStorage($entity_type)->load($reference['target_id']);
       
       if (!$entity) {
@@ -435,6 +467,10 @@ class ComponentContentExtractor {
     $text_parts = [];
     
     try {
+      if (!$this->entityTypeManager->hasDefinition('media')) {
+        return '';
+      }
+
       foreach ($selection as $media_id) {
         $media = $this->entityTypeManager->getStorage('media')->load($media_id);
         if ($media) {
@@ -520,12 +556,27 @@ class ComponentContentExtractor {
    * Build cache key for entity and extraction type.
    */
   protected function buildCacheKey(EntityInterface $entity, string $type): string {
+    // Use a hash of relevant entity properties instead of just changed time
+    $hash_data = [
+      'entity_type' => $entity->getEntityTypeId(),
+      'entity_id' => $entity->id(),
+      'entity_uuid' => $entity->uuid(),
+    ];
+
+    // Add changed time if available
+    if (method_exists($entity, 'getChangedTime')) {
+      $hash_data['changed'] = $entity->getChangedTime();
+    }
+
+    // Add revision ID if available
+    if (method_exists($entity, 'getRevisionId')) {
+      $hash_data['revision'] = $entity->getRevisionId();
+    }
+
     return sprintf(
-      'component_search:%s:%s:%s:%s',
+      'component_search:%s:%s',
       $type,
-      $entity->getEntityTypeId(),
-      $entity->id(),
-      $entity->getChangedTime()
+      md5(serialize($hash_data))
     );
   }
 
@@ -546,7 +597,7 @@ class ComponentContentExtractor {
 
     // Check cache age
     $max_age = $config->get('performance_settings.cache_max_age') ?? 86400;
-    if ($max_age > 0 && (REQUEST_TIME - $cached_data->created) > $max_age) {
+    if ($max_age > 0 && ($this->time->getRequestTime() - $cached_data->created) > $max_age) {
       return FALSE;
     }
 
@@ -564,13 +615,19 @@ class ComponentContentExtractor {
     }
 
     $max_age = $config->get('performance_settings.cache_max_age') ?? 86400;
-    $expire = $max_age > 0 ? REQUEST_TIME + $max_age : CacheBackendInterface::CACHE_PERMANENT;
+    $expire = $max_age > 0 ? $this->time->getRequestTime() + $max_age : CacheBackendInterface::CACHE_PERMANENT;
     
     $tags = [
       'component_search',
       'component_search:entity:' . $entity->getEntityTypeId() . ':' . $entity->id(),
     ];
     
-    $this->cache->set($cache_key, $content, $expire, $tags);
+    try {
+      $this->cache->set($cache_key, $content, $expire, $tags);
+    } catch (\Exception $e) {
+      $this->loggerFactory->get('component_search')->warning('Error caching content: @error', [
+        '@error' => $e->getMessage(),
+      ]);
+    }
   }
 }

@@ -227,6 +227,7 @@ function component_search_install() {
         'cache_extractions' => TRUE,
         'cache_max_age' => 86400, // 24 hours
         'batch_size' => 50,
+        'enable_background_indexing' => FALSE,
       ],
       'search_integration' => [
         'core_search' => [
@@ -315,13 +316,16 @@ function component_search_clear_search_indexes() {
     }
 
     // Clear Search API indexes
-    if (\Drupal::moduleHandler()->moduleExists('search_api')) {
-      $index_storage = \Drupal::entityTypeManager()->getStorage('search_api_index');
-      $indexes = $index_storage->loadMultiple();
-      
-      foreach ($indexes as $index) {
-        if ($index->status()) {
-          $index->clear();
+    if (\Drupal::moduleHandler()->moduleExists('search_api') && \Drupal::hasService('entity_type.manager')) {
+      $entity_type_manager = \Drupal::entityTypeManager();
+      if ($entity_type_manager->hasDefinition('search_api_index')) {
+        $index_storage = $entity_type_manager->getStorage('search_api_index');
+        $indexes = $index_storage->loadMultiple();
+        
+        foreach ($indexes as $index) {
+          if ($index->status()) {
+            $index->clear();
+          }
         }
       }
     }

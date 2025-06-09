@@ -59,9 +59,6 @@ component_search.settings:
         batch_size:
           type: integer
           label: 'Batch processing size'
-        max_content_length:
-          type: integer
-          label: 'Maximum content length'
         enable_background_indexing:
           type: boolean
           label: 'Enable background indexing'

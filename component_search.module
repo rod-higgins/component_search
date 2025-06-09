@@ -7,7 +7,6 @@
 
 use Drupal\Core\Entity\EntityInterface;
 use Drupal\Core\Form\FormStateInterface;
-use Drupal\search\SearchIndexInterface;
 
 /**
  * Implements hook_help().
@@ -44,6 +43,11 @@ function component_search_entity_delete(EntityInterface $entity) {
  * Handle entity changes for component field search integration.
  */
 function component_search_handle_entity_change(EntityInterface $entity, string $operation) {
+  // Check if the component search manager service is available
+  if (!\Drupal::hasService('component_search.search_manager')) {
+    return;
+  }
+
   if (!component_search_entity_has_component_fields($entity)) {
     return;
   }
@@ -63,17 +67,24 @@ function component_search_handle_entity_change(EntityInterface $entity, string $
  * Check if entity has component fields.
  */
 function component_search_entity_has_component_fields(EntityInterface $entity): bool {
-  $field_definitions = $entity->getFieldDefinitions();
-  
-  foreach ($field_definitions as $field_definition) {
-    if ($field_definition->getType() === 'component_field') {
-      // Check if the field actually has values
-      $field_name = $field_definition->getName();
-      $field_values = $entity->get($field_name);
-      if (!$field_values->isEmpty()) {
-        return TRUE;
+  try {
+    $field_definitions = $entity->getFieldDefinitions();
+    
+    foreach ($field_definitions as $field_definition) {
+      if ($field_definition->getType() === 'component_field') {
+        // Check if the field actually has values
+        $field_name = $field_definition->getName();
+        $field_values = $entity->get($field_name);
+        if (!$field_values->isEmpty()) {
+          return TRUE;
+        }
       }
     }
+  } catch (\Exception $e) {
+    \Drupal::logger('component_search')->warning('Error checking component fields for entity @id: @error', [
+      '@id' => $entity->id(),
+      '@error' => $e->getMessage(),
+    ]);
   }
   
   return FALSE;
@@ -84,12 +95,24 @@ function component_search_entity_has_component_fields(EntityInterface $entity): 
  */
 function component_search_search_preprocess($text, $langcode = NULL) {
   // Preprocess component field content for core search
-  if (\Drupal::config('component_search.settings')->get('enable_core_search')) {
+  $config = \Drupal::config('component_search.settings');
+  if (!$config->get('enable_core_search')) {
+    return $text;
+  }
+
+  if (!\Drupal::hasService('component_search.content_extractor')) {
+    return $text;
+  }
+
+  try {
     $content_extractor = \Drupal::service('component_search.content_extractor');
     return $content_extractor->preprocessSearchText($text, $langcode);
+  } catch (\Exception $e) {
+    \Drupal::logger('component_search')->error('Error preprocessing search text: @error', [
+      '@error' => $e->getMessage(),
+    ]);
+    return $text;
   }
-  
-  return $text;
 }
 
 /**
@@ -102,6 +125,10 @@ function component_search_node_update_index(EntityInterface $node) {
 
   $config = \Drupal::config('component_search.settings');
   if (!$config->get('enable_core_search')) {
+    return '';
+  }
+
+  if (!\Drupal::hasService('component_search.content_extractor')) {
     return '';
   }
 
@@ -131,6 +158,10 @@ function component_search_search_api_item_index_alter(array &$indexed_values, En
 
   $config = \Drupal::config('component_search.settings');
   if (!$config->get('enable_search_api')) {
+    return;
+  }
+
+  if (!\Drupal::hasService('component_search.content_extractor')) {
     return;
   }
 
@@ -198,13 +229,19 @@ function component_search_entity_bundle_field_info(\Drupal\Core\Entity\EntityTyp
 
   // Add computed field for aggregated component search content
   if ($entity_type->id() === 'node') {
-    $fields['component_searchable_content'] = \Drupal\Core\Field\BaseFieldDefinition::create('component_searchable_content')
-      ->setLabel(t('Component Searchable Content'))
-      ->setDescription(t('Aggregated searchable content from all component fields'))
-      ->setComputed(TRUE)
-      ->setTranslatable(FALSE)
-      ->setDisplayConfigurable('view', FALSE)
-      ->setDisplayConfigurable('form', FALSE);
+    try {
+      $fields['component_searchable_content'] = \Drupal\Core\Field\BaseFieldDefinition::create('component_searchable_content')
+        ->setLabel(t('Component Searchable Content'))
+        ->setDescription(t('Aggregated searchable content from all component fields'))
+        ->setComputed(TRUE)
+        ->setTranslatable(FALSE)
+        ->setDisplayConfigurable('view', FALSE)
+        ->setDisplayConfigurable('form', FALSE);
+    } catch (\Exception $e) {
+      \Drupal::logger('component_search')->warning('Error adding computed field: @error', [
+        '@error' => $e->getMessage(),
+      ]);
+    }
   }
 
   return $fields;
@@ -215,11 +252,66 @@ function component_search_entity_bundle_field_info(\Drupal\Core\Entity\EntityTyp
  */
 function component_search_cache_flush() {
   // Clear component search cache when general cache is flushed
+  if (!\Drupal::hasService('component_search.cache_manager')) {
+    return;
+  }
+
   try {
     $cache_manager = \Drupal::service('component_search.cache_manager');
     $cache_manager->invalidateAllCache();
   } catch (\Exception $e) {
     \Drupal::logger('component_search')->warning('Error clearing component search cache: @error', [
+      '@error' => $e->getMessage(),
+    ]);
+  }
+}
+
+/**
+ * Implements hook_cron().
+ */
+function component_search_cron() {
+  // Check if background indexing is enabled
+  $config = \Drupal::config('component_search.settings');
+  $performance_settings = $config->get('performance_settings') ?? [];
+  
+  if (empty($performance_settings['enable_background_indexing'])) {
+    return;
+  }
+
+  // Process queue items if queue worker is available
+  if (!\Drupal::hasService('queue')) {
+    return;
+  }
+
+  try {
+    $queue = \Drupal::queue('component_search_index');
+    $batch_size = $performance_settings['batch_size'] ?? 50;
+    
+    // Process up to batch_size items
+    $processed = 0;
+    while ($processed < $batch_size && ($item = $queue->claimItem())) {
+      try {
+        $queue_worker = \Drupal::service('plugin.manager.queue_worker')->createInstance('component_search_index');
+        $queue_worker->processItem($item->data);
+        $queue->deleteItem($item);
+        $processed++;
+      } catch (\Exception $e) {
+        // Release the item back to the queue for retry
+        $queue->releaseItem($item);
+        \Drupal::logger('component_search')->error('Error processing queue item during cron: @error', [
+          '@error' => $e->getMessage(),
+        ]);
+        break;
+      }
+    }
+
+    if ($processed > 0) {
+      \Drupal::logger('component_search')->info('Processed @count component search queue items during cron.', [
+        '@count' => $processed,
+      ]);
+    }
+  } catch (\Exception $e) {
+    \Drupal::logger('component_search')->error('Error processing component search queue during cron: @error', [
       '@error' => $e->getMessage(),
     ]);
   }
