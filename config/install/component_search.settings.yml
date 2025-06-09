@@ -22,7 +22,7 @@ performance_settings:
   cache_size_limit: 1048576  # 1MB in bytes
   batch_size: 50
   max_content_length: 50000
-  enable_background_indexing: false
+  enable_background_indexing: true  # New: Queue-based indexing to avoid blocking
 
 # Search integration options
 search_integration:

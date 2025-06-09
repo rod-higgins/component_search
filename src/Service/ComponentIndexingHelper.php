@@ -136,9 +136,44 @@ class ComponentIndexingHelper {
   }
 
   /**
-   * Batch process entities for indexing.
+   * Calculate optimal batch size based on content complexity.
    */
-  public function batchProcessEntities(array $entities, callable $callback, int $batch_size = 50): array {
+  public function calculateOptimalBatchSize(EntityInterface $entity): int {
+    $component_count = $this->getEntityComponentCount($entity);
+    $base_size = $this->configFactory->get('component_search.settings')
+      ->get('performance_settings.batch_size') ?? 50;
+    
+    // Adjust batch size based on component complexity
+    if ($component_count > 10) {
+      return max(5, intval($base_size / 4));
+    }
+    if ($component_count > 5) {
+      return max(10, intval($base_size / 2));
+    }
+    
+    return $base_size;
+  }
+
+  /**
+   * Get count of components in an entity.
+   */
+  protected function getEntityComponentCount(EntityInterface $entity): int {
+    $count = 0;
+    
+    foreach ($entity->getFieldDefinitions() as $field_definition) {
+      if ($field_definition->getType() === 'component_field') {
+        $field_values = $entity->get($field_definition->getName());
+        $count += $field_values->count();
+      }
+    }
+    
+    return $count;
+  }
+
+  /**
+   * Batch process entities for indexing with dynamic batch sizing.
+   */
+  public function batchProcessEntities(array $entities, callable $callback, int $batch_size = null): array {
     $results = [
       'processed' => 0,
       'skipped' => 0,
@@ -146,28 +181,73 @@ class ComponentIndexingHelper {
       'total' => count($entities),
     ];
 
-    $chunks = array_chunk($entities, $batch_size);
+    // Group entities by complexity for optimal batch sizing
+    $entity_groups = $this->groupEntitiesByComplexity($entities);
     
-    foreach ($chunks as $chunk) {
-      foreach ($chunk as $entity) {
-        try {
-          if ($this->entityHasComponentFields($entity)) {
-            $callback($entity);
-            $results['processed']++;
-          } else {
-            $results['skipped']++;
+    foreach ($entity_groups as $complexity => $group_entities) {
+      $optimal_batch_size = $batch_size ?? $this->getOptimalBatchSizeForComplexity($complexity);
+      $chunks = array_chunk($group_entities, $optimal_batch_size);
+      
+      foreach ($chunks as $chunk) {
+        foreach ($chunk as $entity) {
+          try {
+            if ($this->entityHasComponentFields($entity)) {
+              $callback($entity);
+              $results['processed']++;
+            } else {
+              $results['skipped']++;
+            }
+          } catch (\Exception $e) {
+            $results['errors']++;
+            \Drupal::logger('component_search')->error('Error processing entity @id: @error', [
+              '@id' => $entity->id(),
+              '@error' => $e->getMessage(),
+            ]);
           }
-        } catch (\Exception $e) {
-          $results['errors']++;
-          \Drupal::logger('component_search')->error('Error processing entity @id: @error', [
-            '@id' => $entity->id(),
-            '@error' => $e->getMessage(),
-          ]);
         }
       }
     }
 
     return $results;
+  }
+
+  /**
+   * Group entities by complexity for batch processing.
+   */
+  protected function groupEntitiesByComplexity(array $entities): array {
+    $groups = ['low' => [], 'medium' => [], 'high' => []];
+    
+    foreach ($entities as $entity) {
+      $component_count = $this->getEntityComponentCount($entity);
+      
+      if ($component_count <= 3) {
+        $groups['low'][] = $entity;
+      } elseif ($component_count <= 8) {
+        $groups['medium'][] = $entity;
+      } else {
+        $groups['high'][] = $entity;
+      }
+    }
+    
+    return array_filter($groups);
+  }
+
+  /**
+   * Get optimal batch size for complexity level.
+   */
+  protected function getOptimalBatchSizeForComplexity(string $complexity): int {
+    $base_size = $this->configFactory->get('component_search.settings')
+      ->get('performance_settings.batch_size') ?? 50;
+      
+    switch ($complexity) {
+      case 'high':
+        return max(5, intval($base_size / 4));
+      case 'medium':
+        return max(15, intval($base_size / 2));
+      case 'low':
+      default:
+        return $base_size;
+    }
   }
 
   /**

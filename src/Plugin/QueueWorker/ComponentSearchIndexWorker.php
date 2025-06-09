@@ -1,143 +1,119 @@
 <?php
 
-namespace Drupal\component_search\Batch;
+namespace Drupal\component_search\Plugin\QueueWorker;
 
-use Drupal\Core\StringTranslation\StringTranslationTrait;
+use Drupal\Core\Entity\EntityTypeManagerInterface;
+use Drupal\Core\Plugin\ContainerFactoryPluginInterface;
+use Drupal\Core\Queue\QueueWorkerBase;
+use Drupal\component_search\Service\ComponentSearchManager;
+use Symfony\Component\DependencyInjection\ContainerInterface;
 
 /**
- * Batch operations for rebuilding search indexes.
+ * Processes component search indexing queue items.
+ *
+ * @QueueWorker(
+ *   id = "component_search_index",
+ *   title = @Translation("Component Search Index Worker"),
+ *   cron = {"time" = 30}
+ * )
  */
-class RebuildSearchIndexBatch {
-
-  use StringTranslationTrait;
+class ComponentSearchIndexWorker extends QueueWorkerBase implements ContainerFactoryPluginInterface {
 
   /**
-   * Clear Drupal core search index.
+   * The entity type manager.
    */
-  public static function clearCoreSearch(&$context) {
-    if (!isset($context['sandbox']['progress'])) {
-      $context['sandbox']['progress'] = 0;
-      $context['sandbox']['max'] = 1;
-      $context['message'] = t('Clearing Drupal core search index...');
-    }
+  protected EntityTypeManagerInterface $entityTypeManager;
 
-    try {
-      if (\Drupal::hasService('search.index')) {
-        \Drupal::service('search.index')->clear();
-        $context['results']['core_search'] = TRUE;
-        $context['message'] = t('Drupal core search index cleared successfully.');
-      } else {
-        $context['results']['errors'][] = t('Search index service not available.');
-      }
-    } catch (\Exception $e) {
-      $context['results']['errors'][] = t('Error clearing core search index: @error', [
-        '@error' => $e->getMessage(),
-      ]);
-    }
+  /**
+   * The component search manager.
+   */
+  protected ComponentSearchManager $searchManager;
 
-    $context['sandbox']['progress']++;
-    $context['finished'] = 1;
+  /**
+   * Constructs a new ComponentSearchIndexWorker.
+   */
+  public function __construct(
+    array $configuration,
+    $plugin_id,
+    $plugin_definition,
+    EntityTypeManagerInterface $entity_type_manager,
+    ComponentSearchManager $search_manager
+  ) {
+    parent::__construct($configuration, $plugin_id, $plugin_definition);
+    $this->entityTypeManager = $entity_type_manager;
+    $this->searchManager = $search_manager;
   }
 
   /**
-   * Clear Search API indexes.
+   * {@inheritdoc}
    */
-  public static function clearSearchApiIndexes(&$context) {
-    if (!isset($context['sandbox']['progress'])) {
-      $context['sandbox']['progress'] = 0;
-      $context['sandbox']['indexes'] = [];
-      
-      try {
-        if (!\Drupal::moduleHandler()->moduleExists('search_api')) {
-          $context['results']['errors'][] = t('Search API module is not enabled.');
-          $context['finished'] = 1;
-          return;
-        }
+  public static function create(ContainerInterface $container, array $configuration, $plugin_id, $plugin_definition) {
+    return new static(
+      $configuration,
+      $plugin_id,
+      $plugin_definition,
+      $container->get('entity_type.manager'),
+      $container->get('component_search.search_manager')
+    );
+  }
 
-        $index_storage = \Drupal::entityTypeManager()->getStorage('search_api_index');
-        $indexes = $index_storage->loadMultiple();
-        
-        foreach ($indexes as $index) {
-          if ($index->status()) {
-            $context['sandbox']['indexes'][] = $index;
-          }
+  /**
+   * {@inheritdoc}
+   */
+  public function processItem($data) {
+    if (!isset($data['entity_type']) || !isset($data['entity_id']) || !isset($data['operation'])) {
+      throw new \InvalidArgumentException('Queue item must contain entity_type, entity_id, and operation.');
+    }
+
+    try {
+      $storage = $this->entityTypeManager->getStorage($data['entity_type']);
+      $entity = $storage->load($data['entity_id']);
+
+      if (!$entity) {
+        // Entity may have been deleted, which is fine for delete operations
+        if ($data['operation'] !== 'delete') {
+          \Drupal::logger('component_search')->warning('Entity @type:@id not found for indexing.', [
+            '@type' => $data['entity_type'],
+            '@id' => $data['entity_id'],
+          ]);
         }
-        
-        $context['sandbox']['max'] = count($context['sandbox']['indexes']);
-      } catch (\Exception $e) {
-        $context['results']['errors'][] = t('Error loading Search API indexes: @error', [
-          '@error' => $e->getMessage(),
-        ]);
-        $context['finished'] = 1;
         return;
       }
-    }
 
-    if (empty($context['sandbox']['indexes'])) {
-      $context['message'] = t('No active Search API indexes found.');
-      $context['finished'] = 1;
-      return;
-    }
+      // Check if entity has component fields
+      $has_component_fields = FALSE;
+      foreach ($entity->getFieldDefinitions() as $field_definition) {
+        if ($field_definition->getType() === 'component_field') {
+          $field_values = $entity->get($field_definition->getName());
+          if (!$field_values->isEmpty()) {
+            $has_component_fields = TRUE;
+            break;
+          }
+        }
+      }
 
-    $index = $context['sandbox']['indexes'][$context['sandbox']['progress']];
-    
-    try {
-      $index->clear();
-      $context['results']['search_api_indexes'][] = $index->label();
-      $context['message'] = t('Cleared Search API index: @name', [
-        '@name' => $index->label(),
+      if (!$has_component_fields && $data['operation'] !== 'delete') {
+        return;
+      }
+
+      // Process the entity through the search manager
+      $this->searchManager->handleEntityChange($entity, $data['operation']);
+
+      \Drupal::logger('component_search')->debug('Processed @operation for entity @type:@id', [
+        '@operation' => $data['operation'],
+        '@type' => $data['entity_type'],
+        '@id' => $data['entity_id'],
       ]);
+
     } catch (\Exception $e) {
-      $context['results']['errors'][] = t('Error clearing Search API index @name: @error', [
-        '@name' => $index->label(),
+      \Drupal::logger('component_search')->error('Error processing queue item for entity @type:@id: @error', [
+        '@type' => $data['entity_type'] ?? 'unknown',
+        '@id' => $data['entity_id'] ?? 'unknown',
         '@error' => $e->getMessage(),
       ]);
-    }
-
-    $context['sandbox']['progress']++;
-    $context['finished'] = $context['sandbox']['progress'] / $context['sandbox']['max'];
-  }
-
-  /**
-   * Batch finished callback.
-   */
-  public static function finished($success, $results, $operations) {
-    $messenger = \Drupal::messenger();
-
-    if ($success) {
-      if (!empty($results['core_search'])) {
-        $messenger->addStatus(t('Drupal core search index cleared and will be rebuilt.'));
-      }
-
-      if (!empty($results['search_api_indexes'])) {
-        $messenger->addStatus(t('Search API indexes cleared: @indexes', [
-          '@indexes' => implode(', ', $results['search_api_indexes']),
-        ]));
-      }
-
-      if (empty($results['core_search']) && empty($results['search_api_indexes'])) {
-        $messenger->addWarning(t('No search indexes were found to rebuild.'));
-      }
-    } else {
-      $messenger->addError(t('Search index rebuild completed with errors.'));
-    }
-
-    if (!empty($results['errors'])) {
-      foreach ($results['errors'] as $error) {
-        $messenger->addError($error);
-      }
-    }
-
-    // Clear component search cache
-    try {
-      \Drupal::cache()->invalidateAll();
-      if (\Drupal::hasService('component_search.cache_manager')) {
-        \Drupal::service('component_search.cache_manager')->invalidateAllCache();
-      }
-    } catch (\Exception $e) {
-      $messenger->addWarning(t('Error clearing component search cache: @error', [
-        '@error' => $e->getMessage(),
-      ]));
+      
+      // Re-throw to mark the queue item as failed
+      throw $e;
     }
   }
 }
